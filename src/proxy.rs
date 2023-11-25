@@ -64,7 +64,7 @@ impl Proxy {
         let bind_addr = get_rand_ipv6(self.ipv6, self.prefix_len);
         let mut http = HttpConnector::new();
         http.set_local_address(Some(bind_addr));
-        println!("{} via {bind_addr}", req.uri().host().unwrap_or_default());
+        eprintln!("{} via {bind_addr}", req.uri().host().unwrap_or_default());
 
         let client = Client::builder()
             .http1_title_case_headers(true)
@@ -79,19 +79,33 @@ impl Proxy {
         A: AsyncRead + AsyncWrite + Unpin + ?Sized,
     {
         if let Ok(addrs) = addr_str.to_socket_addrs() {
+            let (addr_v6, addr_v4): (Vec<_>, _) = addrs.partition(|i| i.is_ipv6());
+            // try ipv6 using random addr
             for addr in addrs {
                 let socket = TcpSocket::new_v6()?;
                 let bind_addr = get_rand_ipv6_socket_addr(self.ipv6, self.prefix_len);
                 if socket.bind(bind_addr).is_ok() {
-                    println!("{addr_str} via {bind_addr}");
+                    eprintln!("{addr_str} via {bind_addr}");
                     if let Ok(mut server) = socket.connect(addr).await {
                         tokio::io::copy_bidirectional(upgraded, &mut server).await?;
                         return Ok(());
                     }
                 }
             }
+            // fallback to standard ipv4
+            for addr in addr_v4 {
+                let socket = TcpSocket::new_v4()?;
+                // let bind_addr = get_rand_ipv4_socket_addr()
+                eprintln!("{addr_str} via {bind_addr}");
+                if let Ok(mut server) = socket.connect(addr).await {
+                    tokio::io::copy_bidirectional(upgraded, &mut server).await?;
+                    return Ok(());
+                }
+            }
+
+            println!("failed to connect to {addr_str}");
         } else {
-            println!("error: {addr_str}");
+            println!("dns error: {addr_str}");
         }
 
         Ok(())
@@ -109,4 +123,17 @@ fn get_rand_ipv6(mut ipv6: u128, prefix_len: u8) -> IpAddr {
     let host_part = (rand << prefix_len) >> prefix_len;
     ipv6 = net_part | host_part;
     IpAddr::V6(ipv6.into())
+}
+
+fn get_rand_ipv4_socket_addr(ipv4: u32, prefix_len: u8) -> SocketAddr {
+    let mut rng = rand::thread_rng();
+    SocketAddr::new(get_rand_ipv4(ipv4, prefix_len), rng.gen::<u16>())
+}
+
+fn get_rand_ipv4(mut ipv4: u32, prefix_len: u8) -> IpAddr {
+    let rand: u128 = rand::thread_rng().gen();
+    let net_part = (ipv4 >> (32 - prefix_len)) << (32 - prefix_len);
+    let host_part = (rand << prefix_len) >> prefix_len;
+    ipv4 = net_part | host_part;
+    IpAddr::V4(ipv4.into())
 }
